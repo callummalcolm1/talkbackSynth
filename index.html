@@ -177,15 +177,6 @@
                 resize();
                 window.addEventListener("resize", resize);
 
-                // ── Particle system — three layers ────────────────────────────────────
-                //
-                // Each particle has a `layer` (0=back, 1=mid, 2=front) which determines
-                // size range, alpha, speed, and draw order.
-                //
-                // Layer 0 (back):  huge, slow, low alpha — 200–500px
-                // Layer 1 (mid):   medium, moderate speed — 60–160px
-                // Layer 2 (front): small, fast, crisp — 12–50px
-
                 const COLOURS = ["#e8000d", "#00cc22", "#0055ff", "#8800dd"];
                 const SHAPES = ["circle", "triangle", "rect", "diamond"];
 
@@ -219,8 +210,20 @@
                     },
                 ];
 
-                // Separate arrays per layer so we can draw back→front
                 const layers = [[], [], []];
+
+                // Background colour cycling — starts white, changes on each threshold hit
+                const BG_COLOURS = [
+                    "#ffffff",
+                    "#e8000d",
+                    "#00cc22",
+                    "#0055ff",
+                    "#8800dd",
+                    "#ff6600",
+                    "#00aacc",
+                ];
+                let bgColourIndex = 0;
+                let currentBg = BG_COLOURS[0];
 
                 const THRESHOLD_DB = 80;
 
@@ -285,7 +288,10 @@
                 }
 
                 function animateCanvas() {
-                    ctx.clearRect(0, 0, canvas.width, canvas.height);
+                    // Fill with current background colour each frame
+                    ctx.fillStyle = currentBg;
+                    ctx.fillRect(0, 0, canvas.width, canvas.height);
+
                     // draw back → front
                     for (let li = 0; li < 3; li++) {
                         const arr = layers[li];
@@ -322,7 +328,6 @@
                 let analyser = null;
                 let meterRaf = null;
 
-                // ── RMS dB meter + threshold trigger ─────────────────────────────────
                 const timeBuf = new Float32Array(2048);
                 let lastTrigger = 0;
 
@@ -338,7 +343,6 @@
                             sum += timeBuf[i] * timeBuf[i];
                         const rms = Math.sqrt(sum / n);
 
-                        // 1.0 normalised = 100 dB
                         const db =
                             rms > 0 ? 100 + 20 * Math.log10(rms) : -Infinity;
                         const dbClamped = isFinite(db)
@@ -360,12 +364,16 @@
                         ) {
                             lastTrigger = Date.now();
                             const excess = db - THRESHOLD_DB;
-                            // scale total count aggressively with loudness — min 12, max 60
                             const total = Math.min(
                                 300,
                                 80 + Math.floor(excess * 10),
                             );
                             spawnBurst(total);
+
+                            // Advance to next background colour (skip index 0 / white after init)
+                            bgColourIndex =
+                                (bgColourIndex % (BG_COLOURS.length - 1)) + 1;
+                            currentBg = BG_COLOURS[bgColourIndex];
                         }
                     })();
                 }
