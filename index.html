@@ -1,0 +1,467 @@
+<!doctype html>
+<html lang="en">
+    <head>
+        <meta charset="UTF-8" />
+        <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+        <title>Talkback</title>
+        <style>
+            *,
+            *::before,
+            *::after {
+                box-sizing: border-box;
+                margin: 0;
+                padding: 0;
+            }
+
+            html,
+            body {
+                width: 100%;
+                height: 100%;
+                background: white;
+                font-family: Arial, sans-serif;
+                overflow: hidden;
+            }
+
+            #canvas {
+                position: absolute;
+                inset: 0;
+                bottom: 72px;
+                width: 100%;
+            }
+
+            #bar {
+                position: absolute;
+                bottom: 0;
+                left: 0;
+                right: 0;
+                height: 72px;
+                background: white;
+                border-top: 1px solid white;
+                display: flex;
+                align-items: center;
+                gap: 20px;
+                padding: 0 24px;
+            }
+
+            button {
+                font-family: Arial, sans-serif;
+                font-size: 11px;
+                letter-spacing: 0.12em;
+                text-transform: uppercase;
+                background: none;
+                border: 1px solid black;
+                color: #111;
+                padding: 8px 18px;
+                cursor: pointer;
+                border-radius: 3px;
+                flex-shrink: 0;
+            }
+            button:disabled {
+                opacity: 0.2;
+                cursor: default;
+            }
+            button.active {
+                border-color: #111;
+            }
+            .ctrl {
+                display: flex;
+                align-items: center;
+                gap: 8px;
+                flex-shrink: 0;
+            }
+            .ctrl label {
+                font-size: 10px;
+                letter-spacing: 0.12em;
+                text-transform: uppercase;
+                color: black;
+                white-space: nowrap;
+            }
+            input[type="range"] {
+                -webkit-appearance: none;
+                width: 90px;
+                height: 2px;
+                background: #ccc;
+                outline: none;
+            }
+            input[type="range"]::-webkit-slider-thumb {
+                -webkit-appearance: none;
+                width: 11px;
+                height: 11px;
+                border-radius: 50%;
+                background: white;
+                border: 1px solid black;
+                cursor: pointer;
+            }
+            .ctrl-val {
+                font-size: 11px;
+                color: black;
+                min-width: 2.4rem;
+            }
+
+            #db-display {
+                font-size: 11px;
+                color: black;
+                letter-spacing: 0.06em;
+                min-width: 60px;
+                white-space: nowrap;
+            }
+            #db-display.hot {
+                color: #e00;
+            }
+
+            #meter-wrap {
+                width: 80px;
+                height: 2px;
+                background: #e0e0e0;
+                border-radius: 1px;
+                overflow: hidden;
+                flex-shrink: 0;
+            }
+            #meter-bar {
+                height: 100%;
+                width: 0%;
+                background: black;
+                transition: width 0.04s linear;
+            }
+
+            #status {
+                font-size: 10px;
+                letter-spacing: 0.1em;
+                text-transform: uppercase;
+                color: black;
+                margin-left: auto;
+                white-space: nowrap;
+            }
+        </style>
+    </head>
+    <body>
+        <canvas id="canvas"></canvas>
+
+        <div id="bar">
+            <button id="btn-start" disabled>start</button>
+            <button id="btn-stop" disabled>stop</button>
+
+            <div class="ctrl">
+                <label>Envelope</label>
+                <input
+                    type="range"
+                    id="pot1"
+                    min="0"
+                    max="1000"
+                    value="0"
+                    step="1"
+                />
+                <span class="ctrl-val" id="pot1-val">0.00</span>
+            </div>
+
+            <div id="meter-wrap"><div id="meter-bar"></div></div>
+            <span id="db-display">— dB</span>
+        </div>
+
+        <script src="patch1.js"></script>
+        <script>
+            (async function Main() {
+                const meterBar = document.getElementById("meter-bar");
+                const dbDisplay = document.getElementById("db-display");
+                const btnStart = document.getElementById("btn-start");
+                const btnStop = document.getElementById("btn-stop");
+                const pot1El = document.getElementById("pot1");
+                const pot1Val = document.getElementById("pot1-val");
+                const canvas = document.getElementById("canvas");
+                const ctx = canvas.getContext("2d");
+
+                function resize() {
+                    canvas.width = window.innerWidth;
+                    canvas.height = window.innerHeight - 72;
+                }
+                resize();
+                window.addEventListener("resize", resize);
+
+                // ── Particle system — three layers ────────────────────────────────────
+                //
+                // Each particle has a `layer` (0=back, 1=mid, 2=front) which determines
+                // size range, alpha, speed, and draw order.
+                //
+                // Layer 0 (back):  huge, slow, low alpha — 200–500px
+                // Layer 1 (mid):   medium, moderate speed — 60–160px
+                // Layer 2 (front): small, fast, crisp — 12–50px
+
+                const COLOURS = ["#e8000d", "#00cc22", "#0055ff", "#8800dd"];
+                const SHAPES = ["circle", "triangle", "rect", "diamond"];
+
+                const LAYERS = [
+                    {
+                        sizeMin: 200,
+                        sizeMax: 500,
+                        speedMax: 1.0,
+                        alphaBase: 0.18,
+                        alphaRange: 0.12,
+                        decay: 0.004,
+                        countShare: 0.25,
+                    },
+                    {
+                        sizeMin: 60,
+                        sizeMax: 160,
+                        speedMax: 2.2,
+                        alphaBase: 0.55,
+                        alphaRange: 0.2,
+                        decay: 0.01,
+                        countShare: 0.35,
+                    },
+                    {
+                        sizeMin: 12,
+                        sizeMax: 50,
+                        speedMax: 20,
+                        alphaBase: 0.8,
+                        alphaRange: 0.2,
+                        decay: 0.02,
+                        countShare: 0.4,
+                    },
+                ];
+
+                // Separate arrays per layer so we can draw back→front
+                const layers = [[], [], []];
+
+                const THRESHOLD_DB = 80;
+
+                function spawnBurst(totalCount) {
+                    LAYERS.forEach((cfg, li) => {
+                        const n = Math.max(
+                            1,
+                            Math.round(totalCount * cfg.countShare),
+                        );
+                        for (let i = 0; i < n; i++) {
+                            const speed = cfg.speedMax;
+                            const angle = Math.random() * Math.PI * 2;
+                            const mag = 0.3 + Math.random();
+                            layers[li].push({
+                                x: Math.random() * canvas.width,
+                                y: Math.random() * canvas.height,
+                                vx: Math.cos(angle) * mag * speed,
+                                vy: Math.sin(angle) * mag * speed,
+                                size:
+                                    cfg.sizeMin +
+                                    Math.random() * (cfg.sizeMax - cfg.sizeMin),
+                                col: COLOURS[
+                                    Math.floor(Math.random() * COLOURS.length)
+                                ],
+                                shape: SHAPES[
+                                    Math.floor(Math.random() * SHAPES.length)
+                                ],
+                                alpha:
+                                    cfg.alphaBase +
+                                    Math.random() * cfg.alphaRange,
+                                decay: cfg.decay * (0.7 + Math.random() * 0.6),
+                            });
+                        }
+                    });
+                }
+
+                function drawShape(p) {
+                    ctx.save();
+                    ctx.globalAlpha = p.alpha;
+                    ctx.fillStyle = p.col;
+                    ctx.translate(p.x, p.y);
+                    const s = p.size;
+                    ctx.beginPath();
+                    if (p.shape === "circle") {
+                        ctx.arc(0, 0, s / 2, 0, Math.PI * 2);
+                    } else if (p.shape === "rect") {
+                        ctx.rect(-s / 2, -s / 2, s, s);
+                    } else if (p.shape === "triangle") {
+                        ctx.moveTo(0, -s / 2);
+                        ctx.lineTo(s / 2, s / 2);
+                        ctx.lineTo(-s / 2, s / 2);
+                        ctx.closePath();
+                    } else {
+                        ctx.moveTo(0, -s / 2);
+                        ctx.lineTo(s / 2, 0);
+                        ctx.lineTo(0, s / 2);
+                        ctx.lineTo(-s / 2, 0);
+                        ctx.closePath();
+                    }
+                    ctx.fill();
+                    ctx.restore();
+                }
+
+                function animateCanvas() {
+                    ctx.clearRect(0, 0, canvas.width, canvas.height);
+                    // draw back → front
+                    for (let li = 0; li < 3; li++) {
+                        const arr = layers[li];
+                        for (let i = arr.length - 1; i >= 0; i--) {
+                            const p = arr[i];
+                            p.x += p.vx;
+                            p.y += p.vy;
+                            p.alpha -= p.decay;
+                            if (p.alpha <= 0) {
+                                arr.splice(i, 1);
+                                continue;
+                            }
+                            drawShape(p);
+                        }
+                    }
+                    requestAnimationFrame(animateCanvas);
+                }
+                animateCanvas();
+
+                // ── HVCC module init ──────────────────────────────────────────────────
+                let heavyModule, loader;
+                try {
+                    heavyModule = await patch1_Module();
+                    loader = new heavyModule.AudioLibLoader();
+                    btnStart.disabled = false;
+                } catch (err) {
+                    console.error(err);
+                    return;
+                }
+
+                let audioCtx = null;
+                let micStream = null;
+                let micSource = null;
+                let analyser = null;
+                let meterRaf = null;
+
+                // ── RMS dB meter + threshold trigger ─────────────────────────────────
+                const timeBuf = new Float32Array(2048);
+                let lastTrigger = 0;
+
+                function startMeter() {
+                    (function tick() {
+                        meterRaf = requestAnimationFrame(tick);
+                        if (!analyser) return;
+
+                        analyser.getFloatTimeDomainData(timeBuf);
+                        let sum = 0;
+                        const n = analyser.fftSize;
+                        for (let i = 0; i < n; i++)
+                            sum += timeBuf[i] * timeBuf[i];
+                        const rms = Math.sqrt(sum / n);
+
+                        // 1.0 normalised = 100 dB
+                        const db =
+                            rms > 0 ? 100 + 20 * Math.log10(rms) : -Infinity;
+                        const dbClamped = isFinite(db)
+                            ? Math.max(db, -60)
+                            : -60;
+
+                        dbDisplay.textContent = dbClamped.toFixed(1) + " dB";
+                        dbDisplay.className = db >= THRESHOLD_DB ? "hot" : "";
+
+                        const pct = Math.max(
+                            0,
+                            Math.min(100, ((dbClamped + 60) / 160) * 100),
+                        );
+                        meterBar.style.width = pct.toFixed(1) + "%";
+
+                        if (
+                            db >= THRESHOLD_DB &&
+                            Date.now() - lastTrigger > 60
+                        ) {
+                            lastTrigger = Date.now();
+                            const excess = db - THRESHOLD_DB;
+                            // scale total count aggressively with loudness — min 12, max 60
+                            const total = Math.min(
+                                300,
+                                80 + Math.floor(excess * 10),
+                            );
+                            spawnBurst(total);
+                        }
+                    })();
+                }
+
+                function stopMeter() {
+                    if (meterRaf) {
+                        cancelAnimationFrame(meterRaf);
+                        meterRaf = null;
+                    }
+                    meterBar.style.width = "0%";
+                    dbDisplay.textContent = "— dB";
+                    dbDisplay.className = "";
+                }
+
+                // ── Start ─────────────────────────────────────────────────────────────
+                btnStart.addEventListener("click", async () => {
+                    btnStart.disabled = true;
+                    try {
+                        micStream = await navigator.mediaDevices.getUserMedia({
+                            audio: {
+                                echoCancellation: false,
+                                noiseSuppression: false,
+                                autoGainControl: false,
+                            },
+                            video: false,
+                        });
+
+                        audioCtx = new AudioContext({
+                            sampleRate: 44100,
+                            latencyHint: "interactive",
+                        });
+
+                        await loader.init({
+                            blockSize: 128,
+                            webAudioContext: audioCtx,
+                            printHook: (msg) => console.log("[pd]", msg),
+                            sendHook: (name, val) =>
+                                console.log("[pd send]", name, val),
+                        });
+
+                        await audioCtx.resume();
+                        loader.start();
+
+                        micSource = audioCtx.createMediaStreamSource(micStream);
+                        micSource.connect(loader.webAudioWorklet);
+
+                        analyser = audioCtx.createAnalyser();
+                        analyser.fftSize = 2048;
+                        micSource.connect(analyser);
+                        startMeter();
+
+                        sendParam("pot1", pot1El.value / 1000);
+                        btnStop.disabled = false;
+                    } catch (err) {
+                        btnStart.disabled = false;
+                        console.error(err);
+                    }
+                });
+
+                // ── Stop ──────────────────────────────────────────────────────────────
+                btnStop.addEventListener("click", () => {
+                    stopMeter();
+                    if (micSource) {
+                        micSource.disconnect();
+                        micSource = null;
+                    }
+                    if (micStream) {
+                        micStream.getTracks().forEach((t) => t.stop());
+                        micStream = null;
+                    }
+                    loader.stop();
+                    if (audioCtx) {
+                        audioCtx.close();
+                        audioCtx = null;
+                    }
+                    analyser = null;
+                    btnStart.disabled = false;
+                    btnStop.disabled = true;
+                });
+
+                // ── pot1 ──────────────────────────────────────────────────────────────
+                pot1El.addEventListener("input", () => {
+                    const norm = pot1El.value / 1000;
+                    pot1Val.textContent = norm.toFixed(2);
+                    sendParam("pot1", norm);
+                });
+
+                function sendParam(name, value) {
+                    if (!loader) return;
+                    if (loader.webAudioWorklet) {
+                        loader.sendFloatParameterToWorklet(name, value);
+                    } else if (loader.audiolib) {
+                        loader.audiolib.setFloatParameter(name, value);
+                    }
+                }
+            })();
+        </script>
+    </body>
+</html>
